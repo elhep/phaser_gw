@@ -1,6 +1,9 @@
 from migen import *
 from phaser_impl import Platform
 from migen.genlib.io import DifferentialInput, DifferentialOutput
+from migen.genlib.cdc import MultiReg, AsyncResetSynchronizer
+from migen.genlib.fsm import *
+from memory_contents import memory_contents
 
 
 # increment this if the behavior (LEDs, registers, EEM pins) changes
@@ -66,7 +69,7 @@ class REG(Module):
 #fRE        11
 #fSDO         0011
 #fMISO        0011
-#fN     443322110004
+#fN     443162110004
 #fN A   332211000003
 #fN D   222222221102
 #
@@ -209,6 +212,7 @@ class Phaser(Module):
 
     | Name      | Width | Function                           | Python
     |-----------+-------+------------------------------------|
+    | CLK_TEST  | 1     | GTP clock test                     |   9
     | ASSY_VAR  | 1     | Assembly variant:                  |  8:9
     |           |       | 0: upconverter                     |
     |           |       | 1: baseband                        |  
@@ -228,6 +232,8 @@ class Phaser(Module):
 
     | Name      | Width | Function                           |
     |-----------+-------+------------------------------------|
+    | DAC_IFRSTn| 1     | DAC interface reset, active low    |  5
+    | DAC_PLAY  | 1     | Play samples embedded in BRAM      |  4
     | DAC_ALARM | 1     | State of DAC alarm pin             |  3
     | DAC_RESETn| 1     | DAC reset, active low              |  2
     | DAC_SLEEP | 1     | DAC sleep, active high             |  1
@@ -297,9 +303,9 @@ class Phaser(Module):
         # Registers
 
         regs = [
+            REG(width=10),
             REG(width=9),
-            REG(width=9),
-            REG(width=4),
+            REG(width=6),
             REG(width=4),
             REG(width=4)
         ]
@@ -307,6 +313,7 @@ class Phaser(Module):
         for i, reg in enumerate(regs):
             self.sr.connect(reg.bus, adr=i, mask=mask)
 
+        clk_gtp_test = Signal()
         assy_variant = platform.request("assy_variant")
         hw_rev = platform.request("hw_rev")
         term_stat = platform.request("term_stat")
@@ -314,7 +321,9 @@ class Phaser(Module):
         led_pads = [platform.request("led", i) for i in range(6)]
         att_rstn = platform.request("att_rstn")
         clk_sel = platform.request("clk_sel")
-                
+        
+        dac_ifreset = Signal()
+        dac_play = Signal()
         dac_alarm = platform.request("dac_alarm")
         dac_resetb = platform.request("dac_resetb")
         dac_sleep = platform.request("dac_sleep")
@@ -328,9 +337,9 @@ class Phaser(Module):
 
         self.comb += [
             # Readout
-            regs[0].read.eq(Cat(term_stat, hw_rev, Constant(__proto_rev__, 2), assy_variant)),
+            regs[0].read.eq(Cat(term_stat, hw_rev, Constant(__proto_rev__, 2), assy_variant, clk_gtp_test)),
             regs[1].read.eq(regs[1].write),
-            regs[2].read.eq(Cat(regs[2].write[0:3], dac_alarm)),
+            regs[2].read.eq(Cat(regs[2].write[0:3], dac_alarm, dac_play, dac_ifreset)),
             regs[3].read.eq(regs[3].write),
             regs[4].read.eq(Cat(regs[0].write[0:2], trf_ld)),
 
@@ -338,6 +347,8 @@ class Phaser(Module):
             clk_sel.eq(regs[1].write[6]),
             att_rstn.eq(regs[1].write[7:9]),
 
+            dac_ifreset.eq(~regs[2].write[5]),
+            dac_play.eq(regs[2].write[4]),
             dac_resetb.eq(regs[2].write[2]),
             dac_sleep.eq(regs[2].write[1]),
             dac_txena.eq(regs[2].write[0]),
@@ -347,6 +358,223 @@ class Phaser(Module):
 
             trf_ps.eq(regs[4].write[0:2])
         ]
+
+        self.clock_domains.cd_dac_clk = ClockDomain()
+        self.clock_domains.cd_dac_clk4x = ClockDomain(reset_less=True)
+        # self.clock_domains.cd_clk200 = ClockDomain(reset_less=True)
+        self.clock_domains.cd_clk125_div2 = ClockDomain(reset_less=True)
+        self.clock_domains.cd_clk_gtp_div2 = ClockDomain(reset_less=True)
+
+        clk125_div2 = Signal()
+        clk125m_pads = platform.request("clk125")
+        self.specials += Instance("IBUFDS_GTE2", o_ODIV2=clk125_div2, i_I=clk125m_pads.p, i_IB=clk125m_pads.n, i_CEB=False)
+        self.cd_clk125_div2.clk.attr.add(("keep", "true"))
+        self.cd_clk125_div2.clk.attr.add(("mark_dbg_hub_clk", "true"))
+        self.specials += Instance("BUFG", i_I=clk125_div2, o_O=self.cd_clk125_div2.clk)
+        platform.add_period_constraint(self.cd_clk125_div2.clk, 16.)
+
+        clk_gtp_div2 = Signal()
+        clk_gtp_pads = platform.request("clk_gtp")
+        self.specials += Instance("IBUFDS_GTE2", o_ODIV2=clk_gtp_div2, i_I=clk_gtp_pads.p, i_IB=clk_gtp_pads.n, i_CEB=False)
+        self.specials += Instance("BUFG", i_I=clk_gtp_div2, o_O=self.cd_clk_gtp_div2.clk)
+        platform.add_period_constraint(self.cd_clk_gtp_div2.clk, 16.)
+
+        clock_tester_gtp = Signal(reset=0)
+        cnt_gtp = Signal(max=1023, reset=1023)
+        self.comb += clock_tester_gtp.eq(cnt_gtp == 0)
+        self.sync.clk_gtp_div2 += If(cnt_gtp != 0, cnt_gtp.eq(cnt_gtp-1))
+        self.specials += MultiReg(clock_tester_gtp, clk_gtp_test, "sys")
+
+        pll_locked = Signal()
+        dac_clk = Signal()
+        dac_clk4x = Signal()
+        dac_clk_shift = Signal()
+        dac_clk4x_shift = Signal()
+        fb_clk = Signal()
+        # pll_clk200 = Signal()
+        
+        self.specials += [
+            Instance("PLLE2_BASE",
+                     p_STARTUP_WAIT="FALSE", 
+                     p_BANDWIDTH="HIGH",
+                     p_CLKIN1_PERIOD=16.0, 
+                     p_CLKFBOUT_MULT=16, # VCO 1000 MHz
+                     p_DIVCLK_DIVIDE=1,
+                     
+                     i_CLKIN1=ClockSignal("clk125_div2"),
+                     i_CLKFBIN=fb_clk,
+                     o_CLKFBOUT=fb_clk,
+
+                    #  i_RST=self.cd_sys.rst,
+                     o_LOCKED=pll_locked,
+
+                     p_CLKOUT0_DIVIDE=2, p_CLKOUT0_PHASE=0.0,
+                     o_CLKOUT0=dac_clk4x,
+
+                     p_CLKOUT1_DIVIDE=8, p_CLKOUT1_PHASE=0.0,
+                     o_CLKOUT1=dac_clk,
+
+                     p_CLKOUT2_DIVIDE=2, p_CLKOUT2_PHASE=90,
+                     o_CLKOUT2=dac_clk4x_shift,
+
+                     p_CLKOUT3_DIVIDE=8, p_CLKOUT3_PHASE=90,
+                     o_CLKOUT3=dac_clk_shift
+                     
+                 
+                     ),
+            Instance("BUFG", i_I=dac_clk, o_O=self.cd_dac_clk.clk),
+            Instance("BUFG", i_I=dac_clk4x, o_O=self.cd_dac_clk4x.clk),
+            # Instance("BUFG", i_I=pll_clk200, o_O=self.cd_clk200.clk),
+            # AsyncResetSynchronizer(self.cd_clk200, ~pll_locked),
+            AsyncResetSynchronizer(self.cd_dac_clk, ~pll_locked),
+        ]
+
+        # reset_counter = Signal(4, reset=15)
+        # ic_reset = Signal(reset=1)
+        # self.sync.clk200 += \
+        #     If(reset_counter != 0,
+        #         reset_counter.eq(reset_counter - 1)
+        #     ).Else(
+        #         ic_reset.eq(0)
+        #     )
+        # self.specials += Instance("IDELAYCTRL", i_REFCLK=ClockSignal("clk200"), i_RST=ic_reset)
+
+        dac_play_dac_clk = Signal()
+        dac_oe = Signal()
+        dac_sample_address = Signal()
+        self.specials += MultiReg(dac_play, dac_play_dac_clk, "dac_clk")
+
+        pattern_length = memory_contents['length']
+        memory_depth = pattern_length // 4
+        memory_address = Signal(max=memory_depth)
+
+        dac_istr = Signal()
+        self.specials += DifferentialOutput(dac_istr, platform.request("dac_istr_p"), platform.request("dac_istr_n"))
+
+        fsm = ClockDomainsRenamer("dac_clk")(FSM(reset_state="IDLE"))
+        self.submodules += fsm
+        
+        fsm.act("IDLE", 
+                NextValue(dac_oe, 0),
+                NextValue(dac_istr, 0),
+                NextValue(memory_address, 0),
+                If(dac_play_dac_clk,
+                   NextValue(dac_istr, 1),
+                   NextState("PLAY"),
+                   NextValue(memory_address, memory_address+1),
+                   NextValue(dac_oe, 1),
+                )
+        )
+
+        fsm.act("PLAY",
+                NextValue(dac_oe, 1),
+                NextValue(dac_istr, 0),
+                If(memory_address >= memory_depth-1,
+                    NextValue(memory_address, 0),
+                    If(~dac_play_dac_clk,
+                        NextState("IDLE"),
+                        NextValue(dac_oe, 0),
+                    )
+                ).Else(
+                   NextValue(memory_address, memory_address+1)
+                )
+        )
+
+        dac_channel_data = {
+            "a": Signal(64),
+            "b": Signal(64),
+            "c": Signal(64),
+            "d": Signal(64)
+        }
+
+        test_signals = {
+            "a": Signal(64, reset=0x7A7A1A1A7A7A1A1A),
+            "b": Signal(64),
+            "c": Signal(64),
+            "d": Signal(64)
+        }
+
+        for ch in "abcd":
+            mem = Memory(depth=memory_depth, width=64, init=memory_contents[ch])
+            read_port = mem.get_port(clock_domain="dac_clk")
+            self.specials += mem, read_port
+            
+            self.comb += [
+                read_port.adr.eq(memory_address),
+                dac_channel_data[ch].eq(read_port.dat_r)
+            ]
+
+        serdes_out = Signal()
+        self.specials += Instance("OSERDESE2",
+            p_DATA_RATE_OQ="DDR", p_DATA_RATE_TQ="BUF",
+            p_DATA_WIDTH=8, p_TRISTATE_WIDTH=1,
+            p_INIT_OQ=0b00000000,
+            o_OQ=serdes_out,
+            i_RST=ResetSignal("dac_clk"),
+            i_CLK=dac_clk4x_shift,
+            i_CLKDIV=dac_clk_shift,
+            i_D1=1,
+            i_D2=0,
+            i_D3=1,
+            i_D4=0,
+            i_D5=1,
+            i_D6=0,
+            i_D7=1,
+            i_D8=0,
+            i_TCE=1, i_OCE=dac_oe,
+            i_T1=0)
+
+        pad_p = platform.request("dac_dataclk_p", 0)
+        pad_n = platform.request("dac_dataclk_n", 0)
+        self.specials += Instance("OBUFDS", i_I=serdes_out, o_O=pad_p, o_OB=pad_n)
+
+        for x,y in ["ab", "cd"]:
+            for line_idx in range(16):
+                pad_p = platform.request("dac_d{}_p".format("".join([x,y])), line_idx)
+                pad_n = platform.request("dac_d{}_n".format("".join([x,y])) , line_idx)
+                serdes_out = Signal()
+
+                # Workaround for HW issue #102
+                if ((x, y) == ("a", "b") and line_idx == 3) or ((x, y) == ("c", "d") and line_idx == 8):
+                    self.specials += Instance("OSERDESE2",
+                        p_DATA_RATE_OQ="DDR", p_DATA_RATE_TQ="BUF",
+                        p_DATA_WIDTH=8, p_TRISTATE_WIDTH=1,
+                        p_INIT_OQ=0b00000000,
+                        o_OQ=serdes_out,
+                        i_RST=ResetSignal("dac_clk"),
+                        i_CLK=ClockSignal("dac_clk4x"),
+                        i_CLKDIV=ClockSignal("dac_clk"),
+                        i_D1=~dac_channel_data[x][0*16+line_idx], 
+                        i_D2=~dac_channel_data[y][0*16+line_idx], 
+                        i_D3=~dac_channel_data[x][1*16+line_idx], 
+                        i_D4=~dac_channel_data[y][1*16+line_idx], 
+                        i_D5=~dac_channel_data[x][2*16+line_idx], 
+                        i_D6=~dac_channel_data[y][2*16+line_idx], 
+                        i_D7=~dac_channel_data[x][3*16+line_idx], 
+                        i_D8=~dac_channel_data[y][3*16+line_idx], 
+                        i_TCE=1, i_OCE=1,
+                        i_T1=0)
+                    self.specials += Instance("OBUFDS", i_I=serdes_out, o_O=pad_n, o_OB=pad_p)
+                else:
+                    self.specials += Instance("OSERDESE2",
+                        p_DATA_RATE_OQ="DDR", p_DATA_RATE_TQ="BUF",
+                        p_DATA_WIDTH=8, p_TRISTATE_WIDTH=1,
+                        p_INIT_OQ=0b00000000,
+                        o_OQ=serdes_out,
+                        i_RST=ResetSignal("dac_clk"),
+                        i_CLK=ClockSignal("dac_clk4x"),
+                        i_CLKDIV=ClockSignal("dac_clk"),
+                        i_D1=dac_channel_data[x][0*16+line_idx], 
+                        i_D2=dac_channel_data[y][0*16+line_idx], 
+                        i_D3=dac_channel_data[x][1*16+line_idx], 
+                        i_D4=dac_channel_data[y][1*16+line_idx], 
+                        i_D5=dac_channel_data[x][2*16+line_idx], 
+                        i_D6=dac_channel_data[y][2*16+line_idx], 
+                        i_D7=dac_channel_data[x][3*16+line_idx], 
+                        i_D8=dac_channel_data[y][3*16+line_idx], 
+                        i_TCE=1, i_OCE=1,
+                        i_T1=0)
+                    self.specials += Instance("OBUFDS", i_I=serdes_out, o_O=pad_p, o_OB=pad_n)
 
         # SPI buses
 
@@ -376,39 +604,32 @@ class Phaser(Module):
 
         # Debug
 
-        clk125m_buf = Signal()
-        clk125m = Signal(attr={("keep", "true"), ("mark_dbg_hub_clk", "true")})
-        clk125m_pads = platform.request("clk125")
-        self.specials += Instance("IBUFDS_GTE2", o_O=clk125m_buf, i_I=clk125m_pads.p, i_IB=clk125m_pads.n, i_CEB=False)
-        self.specials += Instance("BUFG", i_I=clk125m_buf, o_O=clk125m)
-        platform.add_period_constraint(clk125m, 8.)
-
-        platform.toolchain.post_synthesis_commands.append(
-            "source /home/ms/data/pw/cosyquanta/projects/phaser_debug/gateware/insert_ila.tcl")
-        platform.toolchain.post_synthesis_commands.append(
-            "batch_insert_ila {16384}")
-        platform.toolchain.post_synthesis_commands.append(
-            "connect_debug_port dbg_hub/clk [get_nets -hierarchical -filter {mark_dbg_hub_clk == true}]")
+        # platform.toolchain.post_synthesis_commands.append(
+        #     "source /home/ms/data/pw/cosyquanta/projects/phaser_debug/gateware/insert_ila.tcl")
+        # platform.toolchain.post_synthesis_commands.append(
+        #     "batch_insert_ila {16384}")
+        # platform.toolchain.post_synthesis_commands.append(
+        #     "connect_debug_port dbg_hub/clk [get_nets -hierarchical -filter {mark_dbg_hub_clk == true}]")
 
         # # Debug nets definition
 
         trf_ext[0].cs.attr.add(("mark_debug", "true"))
-        trf_ext[0].cs.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[0].cs.attr.add(("mark_debug_clock", "clk125_clk"))
         trf_ext[0].sck.attr.add(("mark_debug", "true"))
-        trf_ext[0].sck.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[0].sck.attr.add(("mark_debug_clock", "clk125_clk"))
         trf_ext[0].sdi.attr.add(("mark_debug", "true"))
-        trf_ext[0].sdi.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[0].sdi.attr.add(("mark_debug_clock", "clk125_clk"))
         trf_ext[0].sdo.attr.add(("mark_debug", "true"))
-        trf_ext[0].sdo.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[0].sdo.attr.add(("mark_debug_clock", "clk125_clk"))
 
         trf_ext[1].cs.attr.add(("mark_debug", "true"))
-        trf_ext[1].cs.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[1].cs.attr.add(("mark_debug_clock", "clk125_clk"))
         trf_ext[1].sck.attr.add(("mark_debug", "true"))
-        trf_ext[1].sck.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[1].sck.attr.add(("mark_debug_clock", "clk125_clk"))
         trf_ext[1].sdi.attr.add(("mark_debug", "true"))
-        trf_ext[1].sdi.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[1].sdi.attr.add(("mark_debug_clock", "clk125_clk"))
         trf_ext[1].sdo.attr.add(("mark_debug", "true"))
-        trf_ext[1].sdo.attr.add(("mark_debug_clock", "clk125m"))
+        trf_ext[1].sdo.attr.add(("mark_debug_clock", "clk125_clk"))
 
         # dac_csn.attr.add(("mark_debug", "true"))
         # dac_sclk.attr.add(("mark_debug", "true"))

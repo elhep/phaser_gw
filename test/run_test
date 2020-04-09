@@ -1,0 +1,1 @@
+(rm -rf ./sim_build; cd ../; python ./phaser.py; mkdir -p ./test/sim_build; cp ./build/mem* ./test/sim_build/) && make
