@@ -1,3 +1,5 @@
+import argparse
+
 from migen import *
 from phaser_impl import Platform
 from migen.genlib.io import DifferentialInput, DifferentialOutput
@@ -232,6 +234,7 @@ class Phaser(Module):
 
     | Name      | Width | Function                           |
     |-----------+-------+------------------------------------|
+    | DAC_TESTen| 1     | DAC test pattern enabled           |  6
     | DAC_IFRSTn| 1     | DAC interface reset, active low    |  5
     | DAC_PLAY  | 1     | Play samples embedded in BRAM      |  4
     | DAC_ALARM | 1     | State of DAC alarm pin             |  3
@@ -262,7 +265,7 @@ class Phaser(Module):
     | PWR SAVE  | 2     | Power saving enabled, active high  |  0:2
 
     """
-    def __init__(self, platform):
+    def __init__(self, platform, memory_contents):
         self.eem = eem = [Signal() for _ in range(4)]
         eemi = [platform.request("lvds", i) for i in range(4)]
         for i, (sig, pad) in enumerate(zip(eem, eemi)):
@@ -273,7 +276,7 @@ class Phaser(Module):
 
         platform.add_period_constraint(eemi[0].p, 8.)
         platform.add_period_constraint(eemi[3].p, 8.)
-
+    
         self.clock_domains.cd_sys = ClockDomain("sys")
         self.clock_domains.cd_sck = ClockDomain("sck")
         self.clock_domains.cd_reg = ClockDomain("reg", reset_less=True)
@@ -305,7 +308,7 @@ class Phaser(Module):
         regs = [
             REG(width=10),
             REG(width=9),
-            REG(width=6),
+            REG(width=7),
             REG(width=4),
             REG(width=4)
         ]
@@ -323,6 +326,7 @@ class Phaser(Module):
         clk_sel = platform.request("clk_sel")
         
         dac_ifreset = Signal()
+        dac_test_pattern_en = Signal()
         dac_play = Signal()
         dac_alarm = platform.request("dac_alarm")
         dac_resetb = platform.request("dac_resetb")
@@ -339,7 +343,7 @@ class Phaser(Module):
             # Readout
             regs[0].read.eq(Cat(term_stat, hw_rev, Constant(__proto_rev__, 2), assy_variant, clk_gtp_test)),
             regs[1].read.eq(regs[1].write),
-            regs[2].read.eq(Cat(regs[2].write[0:3], dac_alarm, dac_play, dac_ifreset)),
+            regs[2].read.eq(Cat(regs[2].write[0:3], dac_alarm, dac_play, dac_ifreset, dac_test_pattern_en)),
             regs[3].read.eq(regs[3].write),
             regs[4].read.eq(Cat(regs[0].write[0:2], trf_ld)),
 
@@ -347,6 +351,7 @@ class Phaser(Module):
             clk_sel.eq(regs[1].write[6]),
             att_rstn.eq(regs[1].write[7:9]),
 
+            dac_test_pattern_en.eq(regs[2].write[6]),
             dac_ifreset.eq(~regs[2].write[5]),
             dac_play.eq(regs[2].write[4]),
             dac_resetb.eq(regs[2].write[2]),
@@ -361,7 +366,6 @@ class Phaser(Module):
 
         self.clock_domains.cd_dac_clk = ClockDomain()
         self.clock_domains.cd_dac_clk4x = ClockDomain(reset_less=True)
-        # self.clock_domains.cd_clk200 = ClockDomain(reset_less=True)
         self.clock_domains.cd_clk125_div2 = ClockDomain(reset_less=True)
         self.clock_domains.cd_clk_gtp_div2 = ClockDomain(reset_less=True)
 
@@ -408,36 +412,26 @@ class Phaser(Module):
                     #  i_RST=self.cd_sys.rst,
                      o_LOCKED=pll_locked,
 
-                     p_CLKOUT0_DIVIDE=2, p_CLKOUT0_PHASE=0.0,
-                     o_CLKOUT0=dac_clk4x,
+                     p_CLKOUT0_DIVIDE=8, p_CLKOUT0_PHASE=0.0,
+                     o_CLKOUT0=dac_clk4x,  # 125 MHz
 
-                     p_CLKOUT1_DIVIDE=8, p_CLKOUT1_PHASE=0.0,
-                     o_CLKOUT1=dac_clk,
+                     p_CLKOUT1_DIVIDE=32, p_CLKOUT1_PHASE=0.0,
+                     o_CLKOUT1=dac_clk,   # 32.5 MHz
 
-                     p_CLKOUT2_DIVIDE=2, p_CLKOUT2_PHASE=90,
+                     p_CLKOUT2_DIVIDE=8, p_CLKOUT2_PHASE=90,
                      o_CLKOUT2=dac_clk4x_shift,
 
-                     p_CLKOUT3_DIVIDE=8, p_CLKOUT3_PHASE=90,
+                     p_CLKOUT3_DIVIDE=32, p_CLKOUT3_PHASE=90,
                      o_CLKOUT3=dac_clk_shift
                      
                  
                      ),
             Instance("BUFG", i_I=dac_clk, o_O=self.cd_dac_clk.clk),
             Instance("BUFG", i_I=dac_clk4x, o_O=self.cd_dac_clk4x.clk),
-            # Instance("BUFG", i_I=pll_clk200, o_O=self.cd_clk200.clk),
-            # AsyncResetSynchronizer(self.cd_clk200, ~pll_locked),
             AsyncResetSynchronizer(self.cd_dac_clk, ~pll_locked),
         ]
-
-        # reset_counter = Signal(4, reset=15)
-        # ic_reset = Signal(reset=1)
-        # self.sync.clk200 += \
-        #     If(reset_counter != 0,
-        #         reset_counter.eq(reset_counter - 1)
-        #     ).Else(
-        #         ic_reset.eq(0)
-        #     )
-        # self.specials += Instance("IDELAYCTRL", i_REFCLK=ClockSignal("clk200"), i_RST=ic_reset)
+        platform.add_period_constraint(self.cd_dac_clk.clk, 8.)
+        platform.add_period_constraint(self.cd_dac_clk4x.clk, 2.)
 
         dac_play_dac_clk = Signal()
         dac_oe = Signal()
@@ -469,12 +463,12 @@ class Phaser(Module):
         fsm.act("PLAY",
                 NextValue(dac_oe, 1),
                 NextValue(dac_istr, 0),
+                If(~dac_play_dac_clk,
+                    NextState("IDLE"),
+                    NextValue(dac_oe, 0),
+                ),
                 If(memory_address >= memory_depth-1,
-                    NextValue(memory_address, 0),
-                    If(~dac_play_dac_clk,
-                        NextState("IDLE"),
-                        NextValue(dac_oe, 0),
-                    )
+                    NextValue(memory_address, 0), 
                 ).Else(
                    NextValue(memory_address, memory_address+1)
                 )
@@ -487,12 +481,13 @@ class Phaser(Module):
             "d": Signal(64)
         }
 
-        test_signals = {
-            "a": Signal(64, reset=0x7A7A1A1A7A7A1A1A),
-            "b": Signal(64),
-            "c": Signal(64),
-            "d": Signal(64)
+        dac_test_patterns = {
+            "a": Signal(64, reset=0x1A1A7A7A1A1A7A7A),
+            "b": Signal(64, reset=0x1616B6B61616B6B6),
+            "c": Signal(64, reset=0xAAAAEAEAAAAAEAEA),
+            "d": Signal(64, reset=0xC6C64545C6C64545)
         }
+        dac_test_pattern_mask = Signal(64)
 
         for ch in "abcd":
             mem = Memory(depth=memory_depth, width=64, init=memory_contents[ch])
@@ -501,7 +496,9 @@ class Phaser(Module):
             
             self.comb += [
                 read_port.adr.eq(memory_address),
-                dac_channel_data[ch].eq(read_port.dat_r)
+                If(dac_test_pattern_en, dac_test_pattern_mask.eq(0xFFFFFFFFFFFFFFFF)).Else(dac_test_pattern_mask.eq(0)),
+                dac_channel_data[ch].eq(
+                    (read_port.dat_r & ~dac_test_pattern_mask) | (dac_test_patterns[ch] & dac_test_pattern_mask))
             ]
 
         serdes_out = Signal()
@@ -637,13 +634,13 @@ class Phaser(Module):
         # dac_sdo.attr.add(("mark_debug", "true"))
 
 
-
-def main():
-    p = Platform()
-    mirny = Phaser(p)
-    p.build(mirny, build_name="phaser", run=True)
-
-
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Phaser gateware builder")
+    parser.add_argument("--no-compile-gateware", action="store_false", default=True,
+                        help="do not compile gateware, just emit Verilog")
+    parser.add_argument("--memory-contents", default="sin", help="memory contents")
+    args = parser.parse_args()
+    p = Platform()
+    phaser = Phaser(p, memory_contents[args.memory_contents])
+    p.build(phaser, build_name="phaser", run=args.no_compile_gateware)
 

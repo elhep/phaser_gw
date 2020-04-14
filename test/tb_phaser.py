@@ -60,6 +60,7 @@ class DiffSPIMaster:
             self.sck <= 0
             # readout.append(int(self.miso))
         self.csn <= 0
+        yield Timer(self.sck_period*2, 'ns')
         return readout
    
    
@@ -89,24 +90,65 @@ class TbPhaser:
             clk <= 1
             yield Timer(4000)
 
+    def signal_array_to_value(self, A):
+        v = 0
+        for i, a in enumerate(reversed(A)):
+            v |= a.value.integer << i
+        return v
+
+    @cocotb.coroutine
+    def test_pattern_monitor(self, iface, rising_edge, pattern):
+        play = self.dut.phaser_dac_play
+        AB = [getattr(self.dut, "dac_d{}_p_{}".format(iface, i)) for i in reversed(range(1,16))]
+        AB.append(getattr(self.dut, "dac_d{}_p".format(iface)))
+        yield RisingEdge(play)
+        print("Starting pattern monitor for pattern {}...".format(pattern))
+        i = 0
+        while True:
+            if rising_edge:
+                yield RisingEdge(self.dut.dac_dataclk_p)
+            else:
+                yield RisingEdge(self.dut.dac_dataclk_n)
+            readout = self.signal_array_to_value(AB)
+            expected = pattern[i % len(pattern)]
+            print(readout)
+            if readout != expected:
+                raise ValueError("Pattern monitor error, iface {}, edge {}, expected: {:x} got: {:x}".format(
+                    iface, "rising" if rising_edge else "falling", expected, readout))
+            else:
+                i += 1
+        
+
 WE = 1 << 16
 
 @cocotb.test()
 def first_test(dut):
     tb = TbPhaser(dut)
-    
+
+    test_pattern_a = [0x7A7A, 0x1A1A]
+    test_pattern_b = [0xB6B6, 0x1616]
+
     yield RisingEdge(dut.phaser_pll_locked)
     yield Timer(100, 'ns')
 
-    yield tb.spi.transfer(0x2 << 17 | WE | (3 << 4), 24)
+    monitor_a = cocotb.fork(tb.test_pattern_monitor("ab", True, test_pattern_a))
+    monitor_b = cocotb.fork(tb.test_pattern_monitor("ab", False, test_pattern_b))
+
+    yield tb.spi.transfer(0x2 << 17 | WE | (1 << 5), 24)
+    yield tb.spi.transfer(0x2 << 17 | WE | (1 << 6) | (1 << 5), 24)
+    yield tb.spi.transfer(0x2 << 17 | WE | (1 << 6) | (1 << 5) | (1 << 4), 24)
+    yield Timer(1.2, 'us')
+
+    yield tb.spi.transfer(0x2 << 17 | WE | (1 << 6) | (1 << 5), 24)
+    yield tb.spi.transfer(0x2 << 17 | WE | (1 << 5), 24)
     yield Timer(500, 'ns')
 
-    yield tb.spi.transfer(0x2 << 17 | WE | (0), 24)
-    yield Timer(500, 'ns')
+    monitor_a.kill()
+    monitor_b.kill()
 
-    yield tb.spi.transfer(0x2 << 17 | WE | (3 << 4), 24)
-    yield Timer(500, 'ns')
+    # yield tb.spi.transfer(0x2 << 17 | WE | (7 << 4), 24)
+    # yield Timer(500, 'ns')
 
-    yield tb.spi.transfer(0x2 << 17 | WE | (0), 24)
-    yield Timer(500, 'ns')
+    # yield tb.spi.transfer(0x2 << 17 | WE | (0), 24)
+    # yield Timer(500, 'ns')
 
