@@ -214,7 +214,6 @@ class Phaser(Module):
 
     | Name      | Width | Function                           | Python
     |-----------+-------+------------------------------------|
-    | CLK_TEST  | 1     | GTP clock test                     |   9
     | ASSY_VAR  | 1     | Assembly variant:                  |  8:9
     |           |       | 0: upconverter                     |
     |           |       | 1: baseband                        |  
@@ -306,7 +305,7 @@ class Phaser(Module):
         # Registers
 
         regs = [
-            REG(width=10),
+            REG(width=9),
             REG(width=9),
             REG(width=7),
             REG(width=4),
@@ -316,7 +315,6 @@ class Phaser(Module):
         for i, reg in enumerate(regs):
             self.sr.connect(reg.bus, adr=i, mask=mask)
 
-        clk_gtp_test = Signal()
         assy_variant = platform.request("assy_variant")
         hw_rev = platform.request("hw_rev")
         term_stat = platform.request("term_stat")
@@ -341,7 +339,7 @@ class Phaser(Module):
 
         self.comb += [
             # Readout
-            regs[0].read.eq(Cat(term_stat, hw_rev, Constant(__proto_rev__, 2), assy_variant, clk_gtp_test)),
+            regs[0].read.eq(Cat(term_stat, hw_rev, Constant(__proto_rev__, 2), assy_variant)),
             regs[1].read.eq(regs[1].write),
             regs[2].read.eq(Cat(regs[2].write[0:3], dac_alarm, dac_play, dac_ifreset, dac_test_pattern_en)),
             regs[3].read.eq(regs[3].write),
@@ -383,12 +381,6 @@ class Phaser(Module):
         self.specials += Instance("BUFG", i_I=clk_gtp_div2, o_O=self.cd_clk_gtp_div2.clk)
         platform.add_period_constraint(self.cd_clk_gtp_div2.clk, 16.)
 
-        clock_tester_gtp = Signal(reset=0)
-        cnt_gtp = Signal(max=1023, reset=1023)
-        self.comb += clock_tester_gtp.eq(cnt_gtp == 0)
-        self.sync.clk_gtp_div2 += If(cnt_gtp != 0, cnt_gtp.eq(cnt_gtp-1))
-        self.specials += MultiReg(clock_tester_gtp, clk_gtp_test, "sys")
-
         pll_locked = Signal()
         dac_clk = Signal()
         dac_clk4x = Signal()
@@ -405,7 +397,7 @@ class Phaser(Module):
                      p_CLKFBOUT_MULT=16, # VCO 1000 MHz
                      p_DIVCLK_DIVIDE=1,
                      
-                     i_CLKIN1=ClockSignal("clk125_div2"),
+                     i_CLKIN1=ClockSignal("clk_gtp_div2"),
                      i_CLKFBIN=fb_clk,
                      o_CLKFBOUT=fb_clk,
 
@@ -468,7 +460,8 @@ class Phaser(Module):
                     NextValue(dac_oe, 0),
                 ),
                 If(memory_address >= memory_depth-1,
-                    NextValue(memory_address, 0), 
+                    NextValue(memory_address, 0),
+                    If(dac_test_pattern_en, NextValue(dac_istr, 1)),
                 ).Else(
                    NextValue(memory_address, memory_address+1)
                 )
@@ -518,7 +511,7 @@ class Phaser(Module):
             i_D6=0,
             i_D7=1,
             i_D8=0,
-            i_TCE=1, i_OCE=dac_oe,
+            i_TCE=1, i_OCE=1,#dac_oe,
             i_T1=0)
 
         pad_p = platform.request("dac_dataclk_p", 0)
@@ -610,23 +603,23 @@ class Phaser(Module):
 
         # # Debug nets definition
 
-        trf_ext[0].cs.attr.add(("mark_debug", "true"))
-        trf_ext[0].cs.attr.add(("mark_debug_clock", "clk125_clk"))
-        trf_ext[0].sck.attr.add(("mark_debug", "true"))
-        trf_ext[0].sck.attr.add(("mark_debug_clock", "clk125_clk"))
-        trf_ext[0].sdi.attr.add(("mark_debug", "true"))
-        trf_ext[0].sdi.attr.add(("mark_debug_clock", "clk125_clk"))
-        trf_ext[0].sdo.attr.add(("mark_debug", "true"))
-        trf_ext[0].sdo.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[0].cs.attr.add(("mark_debug", "true"))
+        # trf_ext[0].cs.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[0].sck.attr.add(("mark_debug", "true"))
+        # trf_ext[0].sck.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[0].sdi.attr.add(("mark_debug", "true"))
+        # trf_ext[0].sdi.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[0].sdo.attr.add(("mark_debug", "true"))
+        # trf_ext[0].sdo.attr.add(("mark_debug_clock", "clk125_clk"))
 
-        trf_ext[1].cs.attr.add(("mark_debug", "true"))
-        trf_ext[1].cs.attr.add(("mark_debug_clock", "clk125_clk"))
-        trf_ext[1].sck.attr.add(("mark_debug", "true"))
-        trf_ext[1].sck.attr.add(("mark_debug_clock", "clk125_clk"))
-        trf_ext[1].sdi.attr.add(("mark_debug", "true"))
-        trf_ext[1].sdi.attr.add(("mark_debug_clock", "clk125_clk"))
-        trf_ext[1].sdo.attr.add(("mark_debug", "true"))
-        trf_ext[1].sdo.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[1].cs.attr.add(("mark_debug", "true"))
+        # trf_ext[1].cs.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[1].sck.attr.add(("mark_debug", "true"))
+        # trf_ext[1].sck.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[1].sdi.attr.add(("mark_debug", "true"))
+        # trf_ext[1].sdi.attr.add(("mark_debug_clock", "clk125_clk"))
+        # trf_ext[1].sdo.attr.add(("mark_debug", "true"))
+        # trf_ext[1].sdo.attr.add(("mark_debug_clock", "clk125_clk"))
 
         # dac_csn.attr.add(("mark_debug", "true"))
         # dac_sclk.attr.add(("mark_debug", "true"))

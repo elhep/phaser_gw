@@ -34,7 +34,7 @@ def to_mem_row(vals):
         out |= v << (i*16)
     return out
 
-def sine_wave(init_phase=0, samples_n=512):
+def sine_wave(init_phase=0, samples_n=128):
     vmax = 2**16-1
     samples = [int(vmax/2*(1+sin(i/samples_n*2*pi+init_phase)) ) for i in range(samples_n)]
     samples = list(chunks(samples, 4))
@@ -42,7 +42,7 @@ def sine_wave(init_phase=0, samples_n=512):
     return samples
     
 memory_contents["sin"] = {
-    "length": 512,
+    "length": 128,
     "a": sine_wave(),
     "b": sine_wave(init_phase=pi/2),
     "c": sine_wave(),
