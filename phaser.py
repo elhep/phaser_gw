@@ -592,6 +592,16 @@ class Phaser(Module):
                 ext.sdo.eq(platform.request("trf_rdbk", i))
             ]
 
+        ext = Record(ext_layout)
+        for i in range(2):
+            self.sr.connect_ext(ext, adr=3 + len(regs) + i, mask=mask)
+            self.comb += [
+                platform.request("att_clk", i).eq(ext.sck),
+                platform.request("att_s_in", i).eq(ext.sdi),
+                platform.request("att_le", i).eq(~ext.cs),
+                ext.sdo.eq(platform.request("att_s_out", i))
+            ]
+
         # Debug
 
         # platform.toolchain.post_synthesis_commands.append(

@@ -256,6 +256,16 @@ _io = [
     ("gain", 0, Pins("AA5 AB5"), IOStandard("LVCMOS33")),
     ("gain", 1, Pins("AB6 AA6"), IOStandard("LVCMOS33")),
 
+    ("att_le", 0, Pins("R3"), IOStandard("LVCMOS33")),
+    ("att_clk", 0, Pins("R4"), IOStandard("LVCMOS33")),
+    ("att_s_in", 0, Pins("R2"), IOStandard("LVCMOS33")),  # MOSI
+    ("att_s_out", 0, Pins("T5"), IOStandard("LVCMOS33")),  # MISO
+
+    ("att_le", 1, Pins("R6"), IOStandard("LVCMOS33")),
+    ("att_clk", 1, Pins("T6"), IOStandard("LVCMOS33")),
+    ("att_s_in", 1, Pins("U5"), IOStandard("LVCMOS33")),  # MOSI
+    ("att_s_out", 1, Pins("V4"), IOStandard("LVCMOS33")),  # MISO
+
     ("att_rstn", 0, Pins("V3 T4"), IOStandard("LVCMOS33")),
     ("fan_pwm", 0, Pins("AB7"), IOStandard("LVCMOS33")),
     ("clk_sel", 0, Pins("T20"), IOStandard("LVCMOS25")),
